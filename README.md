@@ -14,4 +14,21 @@ Battery would have a name like '12100AE2500733'.
 
 ## Usage
 
+```typescript
+// create an instance
 const device = new UltimatronBattery('DEVICE MAC')
+
+// subscribe to state updates, required for operations as well
+await device.startScan()
+
+// change chargind and discharging state
+await device.toggleChargingAndDischarging(true, true)
+
+// get cached state and voltage
+console.log("Battery state:", device.getState())
+console.log("Battery voltage:", device.getVoltage())
+
+// release the BLE connection of the device
+device.disconnect()
+
+```
