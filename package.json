@@ -23,8 +23,7 @@
   "author": "sergey.khruschak@gmail.com",
   "license": "MIT",
   "dependencies": {
-    "@abandonware/noble": "^1.9.2-23",
-    "node-ble": "^1.9.0"
+    "@abandonware/noble": "^1.9.2-23"
   },
   "engines": {
     "homebridge": ">=1.0.0"
