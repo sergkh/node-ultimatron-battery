@@ -1,30 +1,9 @@
 "use strict";
-let hap;
-class UltimatronBatteryAccessory {
-    constructor(log, config, api) {
-        this.log = log;
-        this.chargingSwitchService = new hap.Service.Switch(config.name + 'Charging');
-        const characteristic = this.chargingSwitchService.getCharacteristic(hap.Characteristic.On);
-        // characteristic.on(CharacteristicEventTypes.GET, (callback: CharacteristicGetCallback) => {
-        //   log.info("Current state of the switch was returned: " + (this.switchOn ? "ON" : "OFF"));
-        //   callback(undefined, this.switchOn);
-        // })
-        // characteristic.on(CharacteristicEventTypes.SET, (value: CharacteristicValue, callback: CharacteristicSetCallback) => {
-        //   console.log(`执行脚本：node ${[value ? this.onNode : this.offNode]}`)
-        //   let spawnSyncRes = spawnSync("node", [value ? this.onNode : this.offNode], { encoding: "utf-8" })
-        //   console.log("执行结果:", spawnSyncRes.stdout)
-        //   this.switchOn = value as boolean;
-        //   callback()
-        // })
-    }
-    getServices() {
-        return [this.chargingSwitchService];
-    }
-}
-module.exports = (api) => {
-    // Service = homebridge.hap.Service
-    // Characteristic = homebridge.hap.Characteristic
-    hap = api.hap;
-    api.registerAccessory('homebridge-ble-ultimatron-battery', 'BLEUltimatronSensor', UltimatronBatteryAccessory);
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
 };
+Object.defineProperty(exports, "__esModule", { value: true });
+const homeassist_mqtt_1 = __importDefault(require("./homeassist-mqtt"));
+const config_json_1 = __importDefault(require("./config.json"));
+(0, homeassist_mqtt_1.default)(config_json_1.default.mqttUrl, config_json_1.default.user, config_json_1.default.password);
 //# sourceMappingURL=index.js.map

@@ -1,3 +1,6 @@
+import { rejects } from "assert"
+import { listeners } from "process"
+
 const noble = require('@abandonware/noble')
 
 const cmdVoltage = Buffer.from("dda50400fffc77", 'hex')
@@ -17,12 +20,15 @@ const cmdEnableDischargeOnly       = Buffer.from('dd5ae1020001ff1c77', 'hex')
 const cmdEnableChargeAndDischarge  = Buffer.from('dd5ae1020000ff1d77', 'hex')
 const cmdDisableChargeAndDischarge = Buffer.from('dd5ae1020003ff1a77', 'hex')
 
-interface InOutStatus {
+const scanTimeout = 120*1000
+
+
+export interface InOutStatus {
   charging: boolean,
   discharing: boolean 
 }
 
-interface BatteryState {
+export interface BatteryState {
   voltage: number,
   current: number,
   residualCapacity: number,
@@ -34,107 +40,198 @@ interface BatteryState {
   residualCapacityPercent: number,
   status: InOutStatus,
   batteryNo: number,
-  temperatures: number[]
+  temperatures: number[],
+  stamp: Date
 }
 
-interface BatteryVoltage {
-  voltages: number[]
+export interface BatteryVoltage {
+  voltages: number[],
+  stamp: Date
 }
 
-
-class UltimatronBattery {
-  private name: string
+export class UltimatronBattery {
+  name: string
   private updateInterval = 10000
   private device: any | null = null
   private writeChar: any | null = null
   private state: BatteryState | null = null
   private voltages: BatteryVoltage | null = null
   private pollerId: any | null = null
+  private stateListeners: ((a: BatteryState) => void)[] = []
+  private connected: boolean = false
+  private sharedMode = true // forces to fully disconnect between state updates
 
-  constructor(name: string) {
+  private constructor(name: string) {
     this.name = name
+  }
 
-    noble.on('stateChange', async (state: any) => {
-      if (state === 'poweredOn') {
-        console.log('Started device scanning')
-        await noble.startScanningAsync([batteryServiceId], false)
-      } else {
+  static async forName(name: string): Promise<UltimatronBattery> {
+    const battery = new UltimatronBattery(name)
+    var connected = false
+
+    return await new Promise((resolve, reject) => {
+      // Fail after 'scanTimeout' milliseconds
+      setTimeout(() => {
+        if (!connected) {
+          noble.stopScanningAsync().then(() => {
+            if(!connected) reject(Error('Timeout while looking for a device'))
+          })
+          
+        }
+      }, scanTimeout)
+
+      noble.on('stateChange', async (state: any) => {
+        if (state === 'poweredOn') {
+          console.log('Started device scanning')
+          await noble.startScanningAsync([batteryServiceId], false)
+        } else {
+          await noble.stopScanningAsync()
+        }
+      })
+  
+      noble.on('discover', async (peripheral: any) => {
+        if (peripheral.advertisement.localName !== name) return     
         await noble.stopScanningAsync()
-      }
-    })
-
-    noble.on('discover', async (peripheral: any) => {
-      if (peripheral.advertisement.localName !== this.name) return     
-      await noble.stopScanningAsync()
-      this.connectToDevice(peripheral)
+        await battery.initialSetup(peripheral)
+        connected = true
+        resolve(battery)
+      })
     })
   }
 
-  async connectToDevice(peripheral: any) {
-    this.device = peripheral
+  static async findAll(scanTimeoutMs: number, limit: number): Promise<UltimatronBattery[]> {
+    const batteries: UltimatronBattery[] = []
 
-    peripheral.once('disconnect', () => {
-      peripheral.removeAllListeners()
-      this.connectToDevice(peripheral)
-    })
+    return await new Promise((resolve, reject) => {
+      // Return whatever we found in specified time
+      const timeout = setTimeout(() => noble.stopScanningAsync().then(() => resolve(batteries)), scanTimeoutMs)
 
-    await peripheral.connectAsync()
-    
-    const {characteristics} = await peripheral.discoverSomeServicesAndCharacteristicsAsync([batteryServiceId])
-
-    const notifyChar = characteristics.find((c: any) => c.uuid == notifyCharId)
-    this.writeChar = characteristics.find((c: any) => c.uuid == writeCharId)
-
-    var bufferPart: Buffer | null = null
-    notifyChar.on('data', (buffer: Buffer) => {
-      try {
-        if (this.header(buffer) === 'dd03') {
-          console.log("Saving buffer part for later")
-          bufferPart = buffer
+      noble.on('stateChange', async (state: any) => {
+        if (state === 'poweredOn') {
+          console.log('Started device scanning')
+          await noble.startScanningAsync([batteryServiceId], false)
         } else {
-          console.log("Processing data")      
-          this.messagesRouter(bufferPart ? Buffer.concat([bufferPart, buffer]) : buffer)
-          
-          if (this.state) console.log("State", this.state)
-          if (this.voltages) console.log("Voltages", this.voltages)
-
-          bufferPart = null
+          await noble.stopScanningAsync()
         }
-      } catch(e) {
-        console.log("Error", e)
-      }
+      })
+  
+      noble.on('discover', async (peripheral: any) => {
+        if (batteries.find(b => b.name === peripheral.advertisement.localName)) {
+          console.log('Ignoring already found battery:', peripheral.advertisement.localName)
+        } else {
+          console.log("Found a battery: " + peripheral.advertisement.localName)
 
+          const battery = new UltimatronBattery(peripheral.advertisement.localName)
+          batteries.push(battery)
+          
+          try {
+            await noble.stopScanningAsync()            
+            await battery.initialSetup(peripheral)
+            await noble.startScanningAsync([batteryServiceId], false)
+          } catch (e) {
+            reject(e)
+            return ;
+          }
+          
+          // Early return
+          if (batteries.length == limit) {
+            console.log("Found enough batteries. Returning")
+            clearTimeout(timeout)
+            resolve(batteries)
+          }
+        }
+      })
     })
-    
-    await notifyChar.subscribeAsync()
+  }
 
-    await this.writeCommand(cmdDetails)    
-    this.polling()
+  async initialSetup(peripheral: any) {
+    try {
+      this.device = peripheral
+      console.log("initializing battery")
+
+      this.device.once('disconnect', () => {
+        this.connected = false
+      })
+
+      await this.connect()
+
+      console.log("Getting characteristics")
+      const {characteristics} = await this.device.discoverSomeServicesAndCharacteristicsAsync([batteryServiceId])
+      console.log("Got characteristics", characteristics)
+
+      const notifyChar = characteristics.find((c: any) => c.uuid == notifyCharId)
+      this.writeChar = characteristics.find((c: any) => c.uuid == writeCharId)
+
+      var bufferPart: Buffer | null = null
+      notifyChar.on('data', (buffer: Buffer) => {
+        try {
+          if (this.header(buffer) === 'dd03') {
+            bufferPart = buffer
+          } else {
+            console.log("Processing data")      
+            this.messagesRouter(bufferPart ? Buffer.concat([bufferPart, buffer]) : buffer)        
+            bufferPart = null
+          }
+        } catch(e) {
+          console.log("Error", e)
+        }
+
+      })
+      
+      await notifyChar.subscribeAsync()
+
+      await this.writeCommand(cmdDetails)    
+      this.polling()
+
+    } catch (e) {
+      console.log("Initialization error", e)
+      throw e
+    }
+  }
+
+  async connect() {
+    if(!this.connected) {
+      console.log("connecting to device")
+      await this.device.connectAsync()
+      this.connected = true
+      console.log("Connected to device")
+    } else {
+      console.log("already connected")
+    }
   }
 
   async disconnect() {
     const device = this.device
     if (device) {
-      device.removeAllListeners()
       await device.disconnectAsync()
-      if (this.pollerId) clearTimeout(this.pollerId)
+      this.connected = false
     } 
   }
 
-  private polling() {
-    var cmdCounter = 0    
-    this.pollerId = setInterval(() => {
-      switch(cmdCounter++) {
-        case 0: this.writeCommand(cmdDetails); break
-        case 1: this.writeCommand(cmdVoltage); break
-      }
-      if (cmdCounter > 1) cmdCounter = 0;
-    }, this.updateInterval)
+  async shutdown() {
+    await this.disconnect()
+    if (this.device) {
+      this.device.removeAllListeners()
+    }
+    if (this.pollerId) clearTimeout(this.pollerId)
   }
 
-  private shutdown(error: Error): any {
-    console.log('Failure, shutting down: ', error)
-    process.exit(1)
+  onStateUpdate(fn: (a: BatteryState) => void) {
+    this.stateListeners.push(fn) 
+  }
+
+  private polling() {    
+    this.pollerId = setInterval(async () => {
+      await this.connect()
+      await this.writeCommand(cmdDetails)
+      await this.writeCommand(cmdVoltage)
+      if (this.sharedMode) {
+        console.log('[shared mode] waiting for state')
+        await this.awaitForState()
+        console.log('[shared mode] disconnecting')
+        await this.disconnect()
+      }
+    }, this.updateInterval)
   }
 
   getState(): BatteryState | null {
@@ -147,7 +244,6 @@ class UltimatronBattery {
 
   async toggleChargingAndDischarging(charging: boolean = true, discharging: boolean = true): Promise<UltimatronBattery> {
     await this.writeCommand(this.commandForStates(charging, discharging))
-    this.state = null
     await this.writeCommand(cmdDetails)
     await this.awaitForState()
     return this
@@ -156,7 +252,6 @@ class UltimatronBattery {
   async toggleDischarging(enable: boolean = true): Promise<UltimatronBattery> {
     const state = (this.state != null) ? this.state : await this.awaitForState()
     await this.writeCommand(this.commandForStates(state.status.charging, enable))
-    this.state = null
     await this.writeCommand(cmdDetails)
     await this.awaitForState()
     return this;
@@ -165,7 +260,6 @@ class UltimatronBattery {
   async toggleCharging(enable: boolean = true): Promise<UltimatronBattery> {
     const state = (this.state != null) ? this.state : await this.awaitForState()
     await this.writeCommand(this.commandForStates(enable, state.status.discharing))
-    this.state = null
     await this.writeCommand(cmdDetails)
     await this.awaitForState()
     return this;
@@ -181,23 +275,24 @@ class UltimatronBattery {
   }
 
   async awaitForState(): Promise<BatteryState> {
-    const self = this
+    const curState = this.state
+    console.log('[state await] current: ', this.state)
 
     return await new Promise((resolve, reject) => {
-      var waitIterations = 10
-      
-      function stateAwait() {
+      const stateAwait = (waitIterations: number) => {
         setTimeout(() => { 
-          if (self.state != null) {
-            resolve(self.state) 
-          } else if (waitIterations-- > 0) {
-            stateAwait()
+          if (this.state !== curState) {
+            console.log('[state await] state updated to: ', this.state)
+            resolve(this.state!)
+          } else if (waitIterations > 0) {
+            stateAwait(waitIterations - 1)
           } else {
             reject(new Error("Timed out while waiting for the initial battery state"))
           }
-        }, 10);
+        }, 20);
       }
-      stateAwait()
+
+      stateAwait(100)
     })
   }
  
@@ -209,11 +304,14 @@ class UltimatronBattery {
   private messagesRouter(buf: Buffer) {
     switch(this.header(buf)) {
       case 'dd03': 
-        return this.state = this.processBatteryData(buf)
+        this.state = this.processBatteryData(buf)        
+        this.stateListeners.forEach((listener) => listener(this.state!))
+        break;
       case 'dd04': 
-        return this.voltages = this.processVoltageData(buf)
+        this.voltages = this.processVoltageData(buf)
+        break;
       default: 
-        return console.log("Ignoring incoming buffer: " + buf.toString('hex'))
+        console.log("Ignoring incoming buffer: " + buf.toString('hex'))
     }
   }
 
@@ -233,7 +331,8 @@ class UltimatronBattery {
         discharing: (buf.readUint8(24) & 2) != 0
       },
       batteryNo: buf.readUint8(25),
-      temperatures: this.getTemperatures(buf)
+      temperatures: this.getTemperatures(buf),
+      stamp: new Date()
     } as BatteryState
   }
   
@@ -247,7 +346,8 @@ class UltimatronBattery {
     }
 
     return {
-      voltages: voltages
+      voltages: voltages,
+      stamp: new Date()
     } as BatteryVoltage
   }
 
@@ -275,5 +375,4 @@ class UltimatronBattery {
   private header(buf: Buffer) {
     return buf.subarray(0, 2).toString('hex')
   }
-  
 }

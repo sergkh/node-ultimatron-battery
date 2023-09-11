@@ -1,0 +1,5 @@
+{
+    "mqttUrl": "mqtt://10.14.1.99:1883",
+    "user": "mqttusr",
+    "password": "850696d4a160f7d10c56cfb2ecd6dd7e6a344151"
+}
