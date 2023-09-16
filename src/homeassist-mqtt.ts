@@ -56,22 +56,22 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
 
 
   function publishBatteryStateHA(battery: UltimatronBattery, state: BatteryState) {
-    client.publish(`homeassistant/sensor/${battery.name}_capacity/state`, state.residualCapacityPercent)
+    client.publish(`homeassistant/sensor/${battery.name}_capacity/state`, state.residualCapacityPercent.toString())
     client.publish(`homeassistant/sensor/${battery.name}_discharge/state`, state.status.discharing ? 'ON' : 'OFF')
   }
 
 client.on('connect', async () => {
   console.log('Connected')
 
-  const batteries = await UltimatronBattery.findAll(60000, 1)
-  console.log("Found batteries: ", batteries)
+  const batteries = await UltimatronBattery.findAll(60000, 1, true, 10*60*1000)
+  console.log("Found batteries: ", batteries.map(b => b.name))
 
   batteries.forEach(battery => {
     batteryDiscoveredHA(battery)
     subscribeToBatteryChanges(battery)
 
     battery.onStateUpdate((state: BatteryState) => {
-      console.log('Got state update: ', state)
+      console.log('Got battery state update: ', state)
       publishBatteryStateHA(battery, state)
     })
   })      
