@@ -1,5 +1,6 @@
 const noble = require('@abandonware/noble')
 
+// currently voltage is not used
 const cmdVoltage = Buffer.from("dda50400fffc77", 'hex')
 const cmdDetails = Buffer.from("dda50300fffd77", 'hex')
 
@@ -16,8 +17,6 @@ const cmdEnableChargeOnly          = Buffer.from('dd5ae1020002ff1b77', 'hex')
 const cmdEnableDischargeOnly       = Buffer.from('dd5ae1020001ff1c77', 'hex')
 const cmdEnableChargeAndDischarge  = Buffer.from('dd5ae1020000ff1d77', 'hex')
 const cmdDisableChargeAndDischarge = Buffer.from('dd5ae1020003ff1a77', 'hex')
-
-const scanTimeout = 120*1000
 
 export interface InOutStatus {
   charging: boolean,
@@ -37,6 +36,7 @@ export interface BatteryState {
   status: InOutStatus,
   batteryNo: number,
   temperatures: number[],
+  powerDrain: number,
   stamp: Date
 }
 
@@ -58,6 +58,8 @@ export class UltimatronBattery {
   private pollerId: any | null = null
   private stateListeners: ((a: BatteryState) => void)[] = []
   private connected: boolean = false
+  private connectionOpsQueue: (() => Promise<any>)[] = [];
+  private connectionBusy = false;
 
   private constructor(name: string, shared: boolean = false, updateInterval: number) { // TODO: make private
     this.name = name
@@ -65,7 +67,15 @@ export class UltimatronBattery {
     this.updateInterval = updateInterval
   }
 
-  static async forName(name: string, shared: boolean = false, updateIntervalMs: number = 30000): Promise<UltimatronBattery> {
+  /**
+   * Scans for a single battery with a specified advertised name.
+   * 
+   * @param {number} scanTimeoutMs - timeout after which scanning stops.
+   * @param {boolean} shared - creates battery instance in shared mode. Which means that BLE connection is only kept 
+   *                            for short update periods and can be used by other BLE clients.
+   * @param {updateIntervalMs} - period between battery state updates
+   */
+  static async forName(name: string, shared: boolean = false, scanTimeoutMs: number, updateIntervalMs: number = 30000): Promise<UltimatronBattery> {
     const battery = new UltimatronBattery(name, shared, updateIntervalMs)
     var connected = false
 
@@ -78,7 +88,7 @@ export class UltimatronBattery {
           })
           
         }
-      }, scanTimeout)
+      }, scanTimeoutMs)
 
       noble.on('stateChange', async (state: any) => {
         if (state === 'poweredOn') {
@@ -99,7 +109,15 @@ export class UltimatronBattery {
     })
   }
 
-  static async findAll(scanTimeoutMs: number, limit: number, shared: boolean = false, updateIntervalMs: number = 30000): Promise<UltimatronBattery[]> {
+  /**
+   * Scans for multiple accessible batteries for up to scanTimeoutMs.
+   * @param {number} scanTimeoutMs - timeout after which scanning stops and all found devices returned.
+   * @param {number} limit - allows to stop scan earlier as long as 'limit' number of devices found.
+   * @param {boolean} shared - creates battery instances in shared mode. Which means that BLE connection is only kept 
+   *                            for short update periods and can be used by other BLE clients.
+   * @param {updateIntervalMs} - period between battery state updates
+   */
+  static async findAll(scanTimeoutMs: number, limit: number = -1, shared: boolean = false, updateIntervalMs: number = 30000): Promise<UltimatronBattery[]> {
     const batteries: UltimatronBattery[] = []
 
     return await new Promise((resolve, reject) => {
@@ -134,22 +152,19 @@ export class UltimatronBattery {
           }
           
           // Early return
-          if (batteries.length == limit) {
-            console.log("Found enough batteries. Returning")
+          if (limit != -1 && batteries.length == limit) {
             clearTimeout(timeout)
-            resolve(batteries)
-            noble.stopScanningAsync()
+            await noble.stopScanningAsync()
+            resolve(batteries)            
           }
         }
       })
     })
   }
 
-  async initialSetup(peripheral: any) {
+  private async initialSetup(peripheral: any) {
     try {
       this.device = peripheral
-      console.log("initializing battery")
-
       this.device.once('disconnect', () => {
         this.connected = false
       })
@@ -165,15 +180,13 @@ export class UltimatronBattery {
     }
   }
 
-  async connect() {
-    if(!this.connected) {
+  private async connect() {
+    if (!this.connected) {
       console.log("connecting to device")
       await this.device.connectAsync()
       this.connected = true
 
-      console.log("Getting characteristics")
       const {characteristics} = await this.device.discoverSomeServicesAndCharacteristicsAsync([batteryServiceId])
-      console.log("Got characteristics")
 
       const notifyChar = characteristics.find((c: any) => c.uuid == notifyCharId)
       this.writeChar = characteristics.find((c: any) => c.uuid == writeCharId)
@@ -205,8 +218,7 @@ export class UltimatronBattery {
     }
   }
 
-  async disconnect() {
-    console.log('Disconnecting')
+  private async disconnect() {
     const device = this.device
     if (device) {
       await device.disconnectAsync()
@@ -217,6 +229,7 @@ export class UltimatronBattery {
   }
 
   setUpdateInterval(intervalMs: number) {
+    // TODO: reschedule the listener if necessary, allow auto mode?    
     this.updateInterval = intervalMs
   }
 
@@ -225,67 +238,115 @@ export class UltimatronBattery {
     if (this.pollerId) clearTimeout(this.pollerId)
   }
 
+  /** Subscribes on periodic state updates */
   onStateUpdate(fn: (a: BatteryState) => void) {
     this.stateListeners.push(fn) 
   }
 
+  /** Returns latest obtained battery state or null if state has not been initialized yet */
+  getLastState(): BatteryState | null {
+    return this.state
+  }
+
   private async initPoller() {
-    this.pollerId = setTimeout(() => this.polling(), 1000) // smal initial timeout
+    this.pollerId = setTimeout(() => this.polling(), 1000) // small initial timeout
     this.pollerId = setInterval(() => this.polling(), this.updateInterval)
   }
 
-  private async polling(tries: number = 5) {    
-    await this.connect()
-    await this.writeCommand(cmdDetails)
+  private async polling() {
+    await this.withConnection(async () => this.obtainState())
+  }
 
-    if (this.sharedMode) {
-      console.log('[shared mode] waiting for state')
-      try {
-        await this.awaitForState();
+  private async obtainState(tries: number = 5): Promise<BatteryState> {
+    await this.writeCommand(cmdDetails)    
+    try {
+      return await this.awaitForState();
     } catch (e) {
         // device not always responds on the first details command
         if (tries > 0) {
-            await this.polling(tries - 1)
+            return await this.obtainState(tries - 1)
         } else {
             throw e
         }
     }
-      console.log('[shared mode] disconnecting')
-      await this.disconnect()
+  }
+
+  private async withConnection(fn: () => Promise<any>) {
+    if (this.connectionBusy) {
+      console.log("Connection is used right now. Enquing operation")
+      this.connectionOpsQueue.push(fn)
+    }
+    try {
+      this.connectionBusy = true
+      await this.connect()
+      try {
+        await fn()
+      } catch (e) {
+        console.error("Failed to execute operation withing connection", e)
+        throw e
+      } finally {
+        if (this.sharedMode) {
+          console.log('[shared mode] disconnecting')
+          await this.disconnect()
+        }
+      }
+    } finally {
+      this.connectionBusy = false
+      const enquedOperation = this.connectionOpsQueue.shift()
+      if (enquedOperation) {
+        console.log("Getting operation from quee")
+        this.withConnection(enquedOperation)
+      }
     }
   }
 
-  getState(): BatteryState | null {
-    return this.state
-  }
-
-  getVoltages(): BatteryVoltage | null {
-    return this.voltages
-  }
+  // not used currently
+  // getVoltages(): BatteryVoltage | null {
+  //   return this.voltages
+  // }
 
   async toggleChargingAndDischarging(charging: boolean = true, discharging: boolean = true): Promise<UltimatronBattery> {
     console.log("Toggling charge and discharge: ", charging, discharging)
-    await this.writeCommand(this.commandForStates(charging, discharging))
-    await this.writeCommand(cmdDetails)
-    await this.awaitForState()
+    
+    await this.withConnection(async () => {
+      await this.writeCommand(this.commandForStates(charging, discharging))
+      await this.writeCommand(cmdDetails)
+      await this.awaitForState()
+    })
+
     return this
   }
 
+  
+
   async toggleDischarging(enable: boolean = true): Promise<UltimatronBattery> {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
     console.log("Toggling discharge: ", enable)
-    const state = (this.state != null) ? this.state : await this.awaitForState()
-    await this.writeCommand(this.commandForStates(state.status.charging, enable))
-    await this.writeCommand(cmdDetails)
-    await this.awaitForState()
+    // TODO: fixme
+    await this.withConnection(async () => {
+      const state = await this.obtainState()
+      await this.writeCommand(this.commandForStates(state.status.charging, enable))
+      await sleep(1000)
+    })
+
+    setTimeout(() => {
+      this.withConnection(async () => {
+        await this.obtainState()
+      })
+    }, 1000)
+
     return this;
   }
 
   async toggleCharging(enable: boolean = true): Promise<UltimatronBattery> {
     console.log("Toggling charge: ", enable)
-    const state = (this.state != null) ? this.state : await this.awaitForState()
-    await this.writeCommand(this.commandForStates(enable, state.status.discharing))
-    await this.writeCommand(cmdDetails)
-    await this.awaitForState()
+    // TODO: fixme
+    await this.withConnection(async () => {
+      const state = await this.obtainState()
+      await this.writeCommand(this.commandForStates(enable, state.status.discharing))
+      await this.obtainState()
+    })
+
     return this;
   }
 
@@ -300,13 +361,12 @@ export class UltimatronBattery {
 
   async awaitForState(): Promise<BatteryState> {
     const curState = this.state
-    console.log('[state await] current: ', curState)
+    console.log('[state await] current: ', curState ? curState.stamp: null)
 
     return await new Promise((resolve, reject) => {
       const stateAwait = (waitIterations: number) => {
         setTimeout(() => { 
           if (this.state !== curState) {
-            console.log('[state await] state updated to: ', this.state)
             resolve(this.state!)
           } else if (waitIterations > 0) {
             stateAwait(waitIterations - 1)
@@ -343,10 +403,11 @@ export class UltimatronBattery {
 
   // dd03001b053000dd0400080cf500dd03001b0530000023ce2710000c2a8c000000001000225c0104
   private processBatteryData(buf: Buffer) {
+    const voltage = buf.readUint16BE(4) / 100
     const current = buf.readUint16BE(6) / 100
 
     return {
-      voltage: buf.readUint16BE(4) / 100,
+      voltage: voltage,
       current: current > 327.68 ? current - 655.36 : current,
       residualCapacity: buf.readUint16BE(8) / 100,
       standardCapacity: buf.readUint16BE(10) / 100,
@@ -361,6 +422,7 @@ export class UltimatronBattery {
       },
       batteryNo: buf.readUint8(25),
       temperatures: this.getTemperatures(buf),
+      powerDrain: voltage * current,
       stamp: new Date()
     } as BatteryState
   }

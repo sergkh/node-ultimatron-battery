@@ -26,6 +26,17 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
       "device": { "identifiers": [ battery.name ], "name": `Ultimatron battery ${battery.name}` }
     }))
 
+    console.log("Publishing to config topic: ", `homeassistant/sensor/${battery.name}_power/config`)
+    
+    client.publish(`homeassistant/sensor/${battery.name}_power/config`, JSON.stringify({
+      'name': 'Ultimatron battery power drain, W',
+      "device_class": "power",
+      "unit_of_measurement": "W",
+      "state_topic": `homeassistant/sensor/${battery.name}_power/state`,
+      'unique_id': `${battery.name}_power`,
+      "device": { "identifiers": [ battery.name ], "name": `Ultimatron battery ${battery.name}` }
+    }))
+
     console.log("Publishing to config topic: ", `homeassistant/switch/${battery.name}_discharge/config`)
 
     client.publish(`homeassistant/switch/${battery.name}_discharge/config`, JSON.stringify({
@@ -57,11 +68,12 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
 
   function publishBatteryStateHA(battery: UltimatronBattery, state: BatteryState) {
     client.publish(`homeassistant/sensor/${battery.name}_capacity/state`, state.residualCapacityPercent.toString())
-    client.publish(`homeassistant/sensor/${battery.name}_discharge/state`, state.status.discharing ? 'ON' : 'OFF')
+    client.publish(`homeassistant/sensor/${battery.name}_power/state`, state.powerDrain.toString())
+    client.publish(`homeassistant/switch/${battery.name}_discharge/state`, state.status.discharing ? 'ON' : 'OFF')
   }
 
 client.on('connect', async () => {
-  console.log('Connected')
+  console.log('Connected to broker')
 
   const batteries = await UltimatronBattery.findAll(60000, 1, true, 10*60*1000)
   console.log("Found batteries: ", batteries.map(b => b.name))
@@ -71,7 +83,7 @@ client.on('connect', async () => {
     subscribeToBatteryChanges(battery)
 
     battery.onStateUpdate((state: BatteryState) => {
-      console.log('Got battery state update: ', state)
+      console.log('Got battery state update')
       publishBatteryStateHA(battery, state)
     })
   })      

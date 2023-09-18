@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import startHomeassitantMQTTService from './homeassist-mqtt'
 import config from './config.json'
 
