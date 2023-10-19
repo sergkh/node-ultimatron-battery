@@ -16,7 +16,7 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
   console.log("Created a MQTT client")
 
   function batteryDiscoveredHA(battery: UltimatronBattery) {
-    console.log("Publishing to config topic: ", `homeassistant/sensor/${battery.name}_capacity/config`)
+    console.log("[mqtt] Publishing to config topic: ", `homeassistant/sensor/${battery.name}_capacity/config`)
     
     client.publish(`homeassistant/sensor/${battery.name}_capacity/config`, JSON.stringify({
       'name': 'Ultimatron battery remaining capacity',
@@ -26,7 +26,7 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
       "device": { "identifiers": [ battery.name ], "name": `Ultimatron battery ${battery.name}` }
     }))
 
-    console.log("Publishing to config topic: ", `homeassistant/sensor/${battery.name}_power/config`)
+    console.log("[mqtt] Publishing to config topic: ", `homeassistant/sensor/${battery.name}_power/config`)
     
     client.publish(`homeassistant/sensor/${battery.name}_power/config`, JSON.stringify({
       'name': 'Ultimatron battery power drain, W',
@@ -37,7 +37,7 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
       "device": { "identifiers": [ battery.name ], "name": `Ultimatron battery ${battery.name}` }
     }))
 
-    console.log("Publishing to config topic: ", `homeassistant/switch/${battery.name}_discharge/config`)
+    console.log("[mqtt] Publishing to config topic: ", `homeassistant/switch/${battery.name}_discharge/config`)
 
     client.publish(`homeassistant/switch/${battery.name}_discharge/config`, JSON.stringify({
       'name': 'Ultimatron battery discharge switch',
@@ -50,21 +50,23 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
 
   function subscribeToBatteryChanges(battery: UltimatronBattery) {
     client.subscribe(`homeassistant/switch/${battery.name}_discharge/set`, async (err: Error) => {
-      console.log("Subscribed to discharge events", err)
+      console.log("[mqtt] Subscribed to discharge events", err)
       
       client.on("message", (topic: string, message: Buffer) => {      
-        console.log("> " + topic, message.toString('utf8'));
+        console.log("[mqtt]> " + topic, message.toString('utf8'));
         const on = message.toString('utf8') === 'ON'
         if (topic == `homeassistant/switch/${battery.name}_discharge/set`) {
-          console.log("toggling battery discharge switch")
+          console.log("[mqtt] Toggling battery discharge switch")
           battery.toggleDischarging(on)
+          // Immediately notify about state otherwise Homeassist will revert the toggle state
+          // later it will be updated with actual value
+          client.publish(`homeassistant/switch/${battery.name}_discharge/state`, on ? 'ON' : 'OFF')
         } else {
-          console.log("ignoring message")
+          console.log(`[mqtt] Ignoring message on topic ${topic}`)
         }
       });
     })
   }
-
 
   function publishBatteryStateHA(battery: UltimatronBattery, state: BatteryState) {
     client.publish(`homeassistant/sensor/${battery.name}_capacity/state`, state.residualCapacityPercent.toString())
@@ -73,17 +75,17 @@ export default function startHomeassitantMQTTService(mqttUrl: string, username: 
   }
 
 client.on('connect', async () => {
-  console.log('Connected to broker')
+  console.log('[mqtt] Connected to broker')
 
   const batteries = await UltimatronBattery.findAll(60000, 1, true, 10*60*1000)
-  console.log("Found batteries: ", batteries.map(b => b.name))
+  console.log("[mqtt] Found batteries: ", batteries.map(b => b.name))
 
   batteries.forEach(battery => {
     batteryDiscoveredHA(battery)
     subscribeToBatteryChanges(battery)
 
     battery.onStateUpdate((state: BatteryState) => {
-      console.log('Got battery state update')
+      console.log("[mqtt] status updated")
       publishBatteryStateHA(battery, state)
     })
   })      

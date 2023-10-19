@@ -46,6 +46,8 @@ export interface BatteryVoltage {
   stamp: Date
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export class UltimatronBattery {
   name: string
   /** Shared mode means that device migth by other apps and we need to release the connection between state fetches or updates */
@@ -60,6 +62,8 @@ export class UltimatronBattery {
   private connected: boolean = false
   private connectionOpsQueue: (() => Promise<any>)[] = [];
   private connectionBusy = false;
+  // if true updates only change internal state without notifying listeners
+  private silenced = false;
 
   private constructor(name: string, shared: boolean = false, updateInterval: number) { // TODO: make private
     this.name = name
@@ -254,7 +258,11 @@ export class UltimatronBattery {
   }
 
   private async polling() {
-    await this.withConnection(async () => this.obtainState())
+    try {
+      await this.withConnection(async () => this.obtainState())
+    } catch (e) {
+      console.log("Polling operation failed:", e)
+    }
   }
 
   private async obtainState(tries: number = 5): Promise<BatteryState> {
@@ -294,7 +302,7 @@ export class UltimatronBattery {
       this.connectionBusy = false
       const enquedOperation = this.connectionOpsQueue.shift()
       if (enquedOperation) {
-        console.log("Getting operation from quee")
+        console.log("Getting operation from queue")
         this.withConnection(enquedOperation)
       }
     }
@@ -317,15 +325,23 @@ export class UltimatronBattery {
     return this
   }
 
-  
-
   async toggleDischarging(enable: boolean = true): Promise<UltimatronBattery> {
-    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    
     console.log("Toggling discharge: ", enable)
-    // TODO: fixme
+    
+    // if (this.state) {
+    //   this.state.status.discharing = enable
+    //   this.resendStateUpdate(this.state!)
+    // }
+
     await this.withConnection(async () => {
-      const state = await this.obtainState()
-      await this.writeCommand(this.commandForStates(state.status.charging, enable))
+      this.silenced = true
+      try {
+        const state = await this.obtainState()
+        await this.writeCommand(this.commandForStates(state.status.charging, enable))
+      } finally {
+        this.silenced = false
+      }
       await sleep(1000)
     })
 
@@ -340,12 +356,24 @@ export class UltimatronBattery {
 
   async toggleCharging(enable: boolean = true): Promise<UltimatronBattery> {
     console.log("Toggling charge: ", enable)
-    // TODO: fixme
+
     await this.withConnection(async () => {
-      const state = await this.obtainState()
-      await this.writeCommand(this.commandForStates(enable, state.status.discharing))
-      await this.obtainState()
+      this.silenced = true
+      try {
+        const state = await this.obtainState()        
+        state.status.charging = enable
+        await this.writeCommand(this.commandForStates(enable, state.status.discharing))
+      } finally {
+        this.silenced = false
+      }
+      await sleep(1000)
     })
+
+    setTimeout(() => {
+      this.withConnection(async () => {
+        await this.obtainState()
+      })
+    }, 1000)
 
     return this;
   }
@@ -390,14 +418,22 @@ export class UltimatronBattery {
     console.log("Processing data: " + buf.toString('hex'))
     switch(this.header(buf)) {
       case 'dd03': 
-        this.state = this.processBatteryData(buf)        
-        this.stateListeners.forEach((listener) => listener(this.state!))
+        this.state = this.processBatteryData(buf)
+        this.resendStateUpdate(this.state!)
         break;
       case 'dd04': 
         this.voltages = this.processVoltageData(buf)
         break;
       default: 
         console.log("Ignoring incoming buffer: " + buf.toString('hex'))
+    }
+  }
+
+  private resendStateUpdate(state: BatteryState) {
+    if (!this.silenced) {
+      this.stateListeners.forEach((listener) => listener(state))
+    } else {
+      console.log("Skipping listeners notification")
     }
   }
 
