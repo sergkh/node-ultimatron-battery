@@ -1,26 +1,37 @@
 {
-  "name": "battery-ble",
-  "version": "1.0.0",
+  "name": "homebridge-ble-ultimatron-battery",
+  "version": "0.0.1",
   "description": "Communication with Ultimatron battery BMS",
-  "main": "src/index.ts",
+  "main": "dist/index.ts",
   "scripts": {
-    "build": "rimraf ./build && tsc",
+    "clean": "rimraf ./dist",
+    "build": "rimraf ./dist && tsc",
     "start": "npx nodemon",
-    "start:prod": "npm run build && node build/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:prod": "npm run build && node dist/index.js",
+    "start:test": "npm run build && node dist/battery.js"
   },
   "keywords": [
-    "bms",
     "ultimatron",
-    "battery"
+    "bms",
+    "battery",
+    "ble",
+    "noble",
+    "homekit",
+    "homebridge",
+    "homebridge-plugin"
   ],
-  "author": "sergiy.khruschak@gmail.com",
+  "author": "sergey.khruschak@gmail.com",
   "license": "MIT",
   "dependencies": {
-    "node-ble": "^1.9.0"
+    "@abandonware/noble": "^1.9.2-23",
+    "mqtt": "^5.0.4"
+  },
+  "engines": {
+    "homebridge": ">=1.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.5.6",
+    "homebridge": "^1.0.4",
     "nodemon": "^3.0.1",
     "rimraf": "^5.0.1",
     "ts-node": "^10.9.1",
